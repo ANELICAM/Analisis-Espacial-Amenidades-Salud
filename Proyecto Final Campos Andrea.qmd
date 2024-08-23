@@ -1,0 +1,270 @@
+---
+title: "Trabajo Final del Módulo 1 del Curso de Ciencia Abierta, Estadística y Econometría Espacial"
+author: "Andrea Campos"
+format: html
+editor: visual
+---
+
+## Parte 1: Identificación y Reflexión sobre las Amenidades de Salud 
+
+Cargamos las librerías necesarias que nos ayudarán a importar datos, trabajar con datos espaciales, manipular y visualizar datos y realizar análisis espaciales. Se debe revisar previamente el tener cargado los paquetes que contienen estas librerías:
+
+```{r}
+
+#Librerías
+
+library(readxl)
+library(sf) 
+library(tidyverse) 
+library(osmdata) 
+library(spdep) 
+library(cowplot)
+library(lattice)
+library(ggplot2)
+
+```
+
+Obtenemos las coordenadas geográficas que definen el área rectangular alrededor de El Quinche:
+
+```{r}
+
+bbox_elquinche <- getbb("El Quinche, Ecuador")
+```
+
+Creamos una consulta para OpenStreetMap usando la parroquia delimitadora de El Quinche para filtrar los datos para buscar hospitales:
+
+```{r}
+
+osm_query_elquinche <- opq(bbox_elquinche) %>%
+  add_osm_feature(key="amenity", value="hospital") %>% 
+  osmdata_sf()
+```
+
+Extraemos los datos de hospitales representados como puntos:
+
+```{r}
+
+puntos_elquinche <- osm_query_elquinche$osm_points
+```
+
+Descargamos y descomprimimos la " GEODATABASE_NACIONAL_2021/GEODATABASE_NACIONAL_2021.gdb" y obtenemos un conjunto de datos geoespaciales que contienen la información geográfica requerida:
+
+```{r}
+
+st_layers("GEODATABASE_NACIONAL_2021/GEODATABASE_NACIONAL_2021.gdb/")
+```
+
+Cargamos los datos correspondientes a las zonas censales:
+
+```{r}
+
+zonas_total <- st_read("../PROYECTO FINAL CURSO/GEODATABASE_NACIONAL_2021/GEODATABASE_NACIONAL_2021.gdb/", layer = "zon_a")
+```
+
+Filtramos los datos de "zonas_total" para seleccionar solo las filas en las que la columna "zon" es 17, código Provincial de Pichincha:
+
+```{r}
+
+pichincha <- zonas_total %>% filter(str_detect(zon, "^17"))
+```
+
+Creamos un mapa que muestra la Provincia de Pichincha con los hospitales en El Quinche superpuestos:
+
+```{r}
+
+ggplot()+
+  geom_sf(data = pichincha)+
+  geom_sf(data = puntos_elquinche)+
+  labs(title = "Hospitales en la Provincia de Pichincha",
+       subtitle = "Fuente:OpenStreetMaps")+
+  theme_minimal()
+```
+
+En la parroquia de El Quinche existen 14 amenidades clasificadas como "hospitales", sin embargo aunque OSM se actualiza constantemente, la frecuencia y calidad de las actualizaciones varía según la zona, por lo tanto, algunas áreas pueden tener datos imprecisos o encontrarse incompletas.
+
+## Parte 2: Unión de Polígonos de Zonas Censales a Nivel de Parroquias
+
+Cargamos el archivo "01_2022_CPV_Estructura_poblacional.xlsx" y observamos la lista con los nombres de todas las hojas de cálculo en el archivo para saber cuáles están disponibles y decidir cuál es la que vamos a utilizar:
+
+```{r}
+
+excel_sheets("../PROYECTO FINAL CURSO/01_2022_CPV_Estructura_poblacional.xlsx")
+```
+
+Leemos los datos de la hoja 1.2 y seleccionamos el rango de celdas correspondiente:
+
+```{r}
+
+pob_tot <- read_excel("../PROYECTO FINAL CURSO/01_2022_CPV_Estructura_poblacional.xlsx",sheet = "1.2", range = "B11:G1299" )
+```
+
+Asignamos nuevos nombres a las columnas para facilitar su interpretación posterior:
+
+```{r}
+
+names(pob_tot) <- c("provincia", "canton", "parroquia", "total",
+                          "hombres", "mujeres")
+```
+
+Convertimos todos los valores en las columnas en mayúsculas para estandarizar los datos:
+
+```{r}
+
+pob_tot <- pob_tot %>% 
+  mutate(across(c(provincia, canton, parroquia), str_to_upper))
+```
+
+Cargamos la Codificación de la División Política Administrativa:
+
+```{r}
+
+dpa <- read_excel("../PROYECTO FINAL CURSO/CODIFICACIÓN_2022.xlsx", sheet = "CODIGOS")
+```
+
+Unificamos la información de ambas bases para que coincidan con las claves especificadas, esas columnas se añadirán al dataframe:
+
+```{r}
+
+pob_tot <- pob_tot %>% left_join(dpa,by = c("provincia" = "DPA_DESPRO",
+                                        "canton" = "DPA_DESCAN",
+                                        "parroquia" = "DPA_DESPAR") )
+```
+
+Extraemos la parroquia que necesitamos de la columna para crear una nueva:
+
+```{r}
+
+pichincha <- pichincha %>% 
+  mutate(DPA_PARROQ = str_sub(zon, 1, 17))
+```
+
+Consolidamos los datos espaciales para combinar las geometrías de todas las entidades:
+
+```{r}
+
+pichinchaparr <- pichincha %>% group_by(DPA_PARROQ) %>% summarise(Shape = st_union(Shape))
+```
+
+El dataframe se ampliará con las columnas adicionales mediante la combinación de las columnas que tienen nombres coincidientes en ambas bases:
+
+```{r}
+
+pichinchaparr <- pichinchaparr%>% left_join(pob_tot)
+```
+
+## Parte 3: Cálculo del Número Total de Amenidades
+
+Graficamos un mapa de calor que nos muestre el total de amenidades de la parroquia El Quinche:
+
+```{r}
+
+pichinchaparr %>% ggplot()+
+  geom_sf(aes(fill = log(total)))+
+  geom_sf(data = puntos_elquinche)+
+  scale_fill_gradient(low = "blue", high = "orange")+
+  labs(title = "Parroquia el Quinche - Provincia Pichincha",
+       caption = "Fuente: INEC")
+```
+
+## Parte 4: Cálculo del Ratio de Amenidades por Habitante
+
+Convertimos las coordenadas de los puntos al mismo CRS que el de las parroquias:
+
+```{r}
+
+puntos_elquinche <- st_transform(x = puntos_elquinche, crs = st_crs(pichinchaparr))
+```
+
+Asociamos cada punto con la geometría y características de las parroquias para obtener un nuevo dataframe que incluya cada hospital junto con la información del área en la que se encuentra ese hospital:
+
+```{r}
+
+parr_puntos_elquinche <- st_join(x = puntos_elquinche, y = pichinchaparr, join = st_within)
+
+```
+
+Transformamos el dataframe en un tibble que contiene una fila por cada valor único y una columna que contiene el número de hospitales en cada parroquia:
+
+```{r}
+
+parr_puntos_elquinche <- parr_puntos_elquinche %>% count(DPA_PARROQ, 
+                                                 name = "hospitales") %>% 
+  as_tibble()
+
+```
+
+Unimos ambos dataframes añadiendo la información del conteo de hospitales:
+
+```{r}
+
+pichinchaparr <- pichinchaparr %>% left_join(parr_puntos_elquinche)
+```
+
+Nos aseguramos que los valores N.A sean reemplazados por cero:
+
+```{r}
+
+pichinchaparr <- pichinchaparr %>% mutate(hospitales = replace_na(hospitales, 0))
+```
+
+Obtenemos el número de hospitales por cada 1000 habitantes en el area de estudio:
+
+```{r}
+
+pichinchaparr <- pichinchaparr %>% mutate(ih = (hospitales/total)*1000)
+
+```
+
+Gráfico:
+
+```{r}
+
+pichinchaparr %>% ggplot()+
+  geom_sf(aes(fill = log(ih)))+
+  scale_fill_gradient(low = "blue", high = "orange")+
+  labs(title = "Hospitales por cada 1000 habitantes",
+       caption = "Fuente: INEC")
+```
+
+## Parte 5: Cálculo del Índice de Moran para el Indicador de Amenidades de Salud
+
+Obtenemos la lista de vecinos basada en la contigüidad con la Matriz tipo "Queen", luego generaamos la lista de pesos espaciales y representamos las relaciones de contigüidad entre los polígonos:
+
+```{r}
+
+vecinoseq <- poly2nb(pichinchaparr, queen = TRUE)
+  
+vecinos_pesoseq <- nb2listw(vecinoseq,style = "W")
+
+matrizeq <- listw2mat(vecinos_pesoseq)
+```
+
+Gráfico:
+
+```{r}
+
+levelplot(t(matrizeq[1:50,1:50]),
+          scales = list(y = list(at = seq(10, 50, by = 10),
+                                 labels = seq(10, 50, by = 10))),
+          main = "Matriz de Pesos Espaciales Basada en Contigüidad")
+```
+
+Índice de Moran:
+
+```{r}
+
+moran <- moran.test(pichinchaparr$hospitales, listw = vecinos_pesoseq)
+
+moran
+```
+
+No hay evidencia significativa de autocorrelación espacial en los valores de hospitales. El estadístico de Moran es cercano a cero, indicando que no hay una tendencia clara hacia la agrupación o dispersión de los valores espaciales de los hospitales en este caso.
+
+Índice de Moran Local:
+
+```{r}
+
+localmoraneq <- localmoran(pichinchaparr$hospitales, listw = vecinos_pesoseq)
+
+localmoraneq
+```
